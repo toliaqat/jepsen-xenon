@@ -6,4 +6,5 @@
   :main jepsen.xenon
   :dependencies [[org.clojure/clojure "1.8.0"]
                  [jepsen "0.1.4"]
+                 [org.clojure/data.json "0.2.6"]
                  [verschlimmbesserung "0.1.3"]])

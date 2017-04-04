@@ -2,12 +2,16 @@
   (:gen-class)
   (:require [clojure.tools.logging :refer :all]
             [clojure.string :as str]
+            [clojure.data.json :as json]
             [clj-http.client :as httpclient]
             [verschlimmbesserung.core :as v]
+            [slingshot.slingshot :refer [try+]]
             [jepsen [cli :as cli]
                     [client :as client]
                     [control :as c]
                     [db :as db]
+                    [generator :as gen]
+                    [core :as jepsen]
                     [tests :as tests]]
             [jepsen.control.net  :as net]
             [jepsen.control.util :as cu]
@@ -18,26 +22,36 @@
 (def logfile (str dir "/xenon.log"))
 (def pidfile (str dir "/xenon.pid"))
 
-(defn post-node-group-join
-  [session node]
-  (let []
-    (httpclient/post
-                (str "https://" (name (get session :node)) ":8000/core/node-groups/default")
-      {:headers {"X-Session-Auth" (get session "Sessionauth")}
-       :insecure? true
-       :content-type :json
-       :form-params {:kind (str "com:vmware:xenon:services:common:NodeGroupService:JoinPeerRequest")
-                     :memberGroupReference "http://" (net/ip (name node)) ":8000/core/node-groups/default"
-                     :membershipQuorum 1
-                     :localNodeOptions [ "PEER" ] }})))
+(defn r   [_ _] {:type :invoke, :f :read, :value nil})
+(defn w   [_ _] {:type :invoke, :f :write, :value (str "" (rand-int 5))})
+(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
+(defn post-node-group-join
+  [self-node test]
+  (info self-node "triggering join request")
+       (map (fn [node]
+         (info self-node node "joing nodes")
+         (httpclient/post
+                (str "http://" (name self-node) ":8000/core/node-groups/default")
+           {
+            :content-type :json
+            :form-params {
+                     :kind (str "com:vmware:xenon:services:common:NodeGroupService:JoinPeerRequest")
+                     :memberGroupReference (str "http://"  (name node) ":8000/core/node-groups/default")
+                     :membershipQuorum 1
+                     :localNodeOptions [ "PEER" ] }})) (:nodes test) ))
 (defn node-url
   "An HTTP url for connecting to a node on a particular port."
   [node port]
-  (str "http://" (net/ip (name node)) ":" port))
+  (str "http://" (name node) ":" port))
 
 (defn peer-url
   "The HTTP url for other peers to talk to a node."
+  [node]
+  (node-url node 8000))
+
+(defn client-url
+  "The HTTP url clients use to talk to a node."
   [node]
   (node-url node 8000))
 
@@ -50,6 +64,27 @@
               (str (peer-url node))))
        (str/join ",")))
 
+(defn examples
+  "The HTTP url clients use to talk to a node."
+  [node]
+  (str (node-url node 8000) "/core/examples"))
+
+
+(defn client-write-put
+  [node test key value]
+  (httpclient/put (examples node) {:body {:name value} :content-type :json})
+  "")
+
+(defn client-write-post
+  [node test key value]
+  (httpclient/post (examples node) {:body {:name value :documentSelfLink key} :content-type :json})
+  "")
+
+(defn client-read
+  [node key]
+  (:name (json/read-str (:body (httpclient/get (str (examples node) "/" key) {:content-type :json})))))
+
+
 (defn db
   "Xenon host for a particular version."
   [version]
@@ -59,10 +94,10 @@
       (c/exec :mkdir :-p dir)
       (c/cd dir
        (c/su
-        (let [url (str "https://www.dropbox.com/s/51894h03ayt6xtq/xenon-host-" version
-                  "-jar-with-dependencies.jar")
-             dest (str dir "/xenon-host-" version "-jar-with-dependencies.jar")]
-         (c/exec :wget (str url "-O" dest)))
+        ;;(let [url (str "https://www.dropbox.com/s/51894h03ayt6xtq/xenon-host-" version
+        ;;          "-jar-with-dependencies.jar")
+        ;;     dest (str dir "/xenon-host-" version "-jar-with-dependencies.jar")]
+        ;; (c/exec :wget (str url "-O" dest)))
         (cu/start-daemon!
           {:logfile logfile
            :pidfile pidfile
@@ -72,9 +107,15 @@
                 :com.vmware.xenon.host.DecentralizedControlPlaneHost
                 (str "--id="  (name node))
                 (str "--port=" 8000)
-                (str "--publicUri=http://" (net/ip (name node)) ":8000")
+                (str "--bindAddress=" (net/ip (name node)))
+                (str "--publicUri=http://" (name node) ":8000")
                 (str "--sandbox=" (str dir "/sandbox/xenon"))
                 (str "--peerNodes=" (initial-cluster test)))
+          
+          (jepsen/synchronize test)
+          ;;(post-node-group-join node test)
+          (when (= (:name node) "n1") 
+             (client-write-post node test "k" "0"))
 
           (Thread/sleep 10000))))
 
@@ -82,11 +123,30 @@
       (info node "tearing down xenon")
       (cu/stop-daemon! binary pidfile)
       (c/su
-        (c/exec :rm :-rf dir)))
+        (c/exec :rm :-rf (str dir "/sandbox/xenon" ))))
 
     db/LogFiles
     (log-files [_ test node]
       [logfile])))
+
+(def mynode nil)
+
+(defn client
+  "A client for a single compare-and-set register"
+  [conn node]
+  (reify client/Client
+    (setup! [_ test node]
+      (client (v/connect (client-url node)
+                         {:timeout 5000}) node))
+
+    (invoke! [this test op]
+         (case (:f op)
+         :read (assoc op :type :ok, :value (client-read node "k"))
+         :write (do (client-write-put node test "k" (:value op))
+                   (assoc op :type, :ok))))
+
+    (teardown! [_ test])))
+
 
 (defn xenon-test
   "Given an options map from the command line runner (e.g. :nodes, :ssh,
@@ -95,7 +155,12 @@
   (merge tests/noop-test
          {:name "xenon"
           :os debian/os
-          :db (db "1.4.2-SNAPSHOT")}
+          :db (db "1.4.2-SNAPSHOT")
+          :client (client nil nil)
+          :generator (->> (gen/mix [r w])
+                          (gen/stagger 1)
+                          (gen/clients)
+                          (gen/time-limit 15))}
          opts))
 
 (defn -main
