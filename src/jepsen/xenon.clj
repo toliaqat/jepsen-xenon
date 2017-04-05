@@ -28,24 +28,6 @@
 (def logfile (str dir "/xenon.log"))
 (def pidfile (str dir "/xenon.pid"))
 
-(defn r   [_ _] {:type :invoke, :f :read, :value nil})
-(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
-(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
-
-(defn post-node-group-join
-  [self-node test]
-  (info self-node "triggering join request")
-       (map (fn [node]
-         (info self-node node "joing nodes")
-         (httpclient/post
-                (str "http://" (name self-node) ":8000/core/node-groups/default")
-           {
-            :content-type :json
-            :form-params {
-                     :kind (str "com:vmware:xenon:services:common:NodeGroupService:JoinPeerRequest")
-                     :memberGroupReference (str "http://"  (name node) ":8000/core/node-groups/default")
-                     :membershipQuorum 1
-                     :localNodeOptions [ "PEER" ] }})) (:nodes test) ))
 (defn node-url
   "An HTTP url for connecting to a node on a particular port."
   [node port]
@@ -70,24 +52,46 @@
               (str (peer-url node))))
        (str/join ",")))
 
-(defn examples
+(defn examples-url
   "The HTTP url clients use to talk to a node."
   [node]
   (str (node-url node 8000) "/core/examples"))
 
-
-(defn client-write-put
+(defn x-put
   [node test key value]
-  (httpclient/put (str (examples node) "/" key ) {:form-params {:name (str value)} :content-type :json}))
+  (httpclient/put (str (examples-url node) "/" key ) {:form-params {:name (str value)} :content-type :json}))
 
-(defn client-write-post
+(defn x-post
   [node test key value]
-  (httpclient/post (str (examples node)) {:form-params {:name (str value) :documentSelfLink (str key )} :debug true :content-type :json}))
+  (httpclient/post (str (examples-url node)) {:form-params {:name (str value) :documentSelfLink (str key )} :debug true :content-type :json}))
 
-(defn client-read
+(defn x-get
   [node key]
-  (:name (json/read-str (:body (httpclient/get (str (examples node) "/" key) {:accept :json})) :key-fn keyword )))
+  (:name (json/read-str (:body (httpclient/get (str (examples-url node) "/" key) {:accept :json})) :key-fn keyword )))
 
+(defn x-query
+  [node key]
+  (:name (first (vals  (:documents  (json/read-str (:body (httpclient/get (str (examples-url node) "/?$filter=documentSelfLink eq '/core/examples/" key "'") {:accept :json} )) :key-fn keyword) )))))
+
+(defn post-node-group-join
+  [self-node test]
+  (info self-node "triggering join request")
+       (map (fn [node]
+         (info self-node node "joing nodes")
+         (httpclient/post
+                (str "http://" (name self-node) ":8000/core/node-groups/default")
+           {
+            :content-type :json
+            :form-params {
+                     :kind (str "com:vmware:xenon:services:common:NodeGroupService:JoinPeerRequest")
+                     :memberGroupReference (str "http://"  (name node) ":8000/core/node-groups/default")
+                     :membershipQuorum 1
+                     :localNodeOptions [ "PEER" ] }})) (:nodes test) ))
+
+(defn parse-long
+  "Parses a string to a Long. Passes through `nil`."
+  [s]
+  (when s (Long/parseLong s)))
 
 (defn db
   "Xenon host for a particular version."
@@ -120,7 +124,7 @@
           ;;(post-node-group-join node test)
           (info node "initilizing db" node)
           (when (= (str node) ":n1" )
-             (client-write-post node test "k" "0"))
+             (x-post node test "k" "0"))
 
           (Thread/sleep 10000))))
 
@@ -135,12 +139,9 @@
     (log-files [_ test node]
       [logfile])))
 
-(def mynode nil)
-
-(defn parse-long
-  "Parses a string to a Long. Passes through `nil`."
-  [s]
-  (when s (Long/parseLong s)))
+(defn r   [_ _] {:type :invoke, :f :read, :value nil})
+(defn q   [_ _] {:type :invoke, :f :query, :value nil})
+(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
 
 (defn client
   "A client for a single compare-and-set register"
@@ -152,8 +153,9 @@
 
     (invoke! [this test op]
          (case (:f op)
-         :read (assoc op :type :ok, :value (parse-long (client-read node "k")))
-         :write (do (client-write-put node test "k" (:value op))
+         :read (assoc op :type :ok, :value (parse-long (x-get node "k")))
+         :query (assoc op :type :ok, :value (parse-long (x-query node "k")))
+         :write (do (x-put node test "k" (:value op))
                    (assoc op :type, :ok))))
 
     (teardown! [_ test])))
@@ -170,7 +172,7 @@
           :client (client nil nil)
           :nemesis (nemesis/partition-random-halves)
           :model (model/cas-register)
-          :generator (->> (gen/mix [r w])
+          :generator (->> (gen/mix [q w])
                           (gen/stagger 1/100)
                           (gen/nemesis
                             (gen/seq (cycle [(gen/sleep 5)
