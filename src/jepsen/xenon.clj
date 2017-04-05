@@ -7,7 +7,7 @@
             [verschlimmbesserung.core :as v]
             [slingshot.slingshot :refer [try+]]
             [knossos.model :as model]
-            [jepsen [checker :as checker] 
+            [jepsen [checker :as checker]
                     [cli :as cli]
                     [client :as client]
                     [control :as c]
@@ -98,14 +98,14 @@
       (c/exec :mkdir :-p dir)
       (c/cd dir
        (c/su
-        ;;(let [url (str "https://www.dropbox.com/s/51894h03ayt6xtq/xenon-host-" version
-        ;;          "-jar-with-dependencies.jar")
-        ;;     dest (str dir "/xenon-host-" version "-jar-with-dependencies.jar")]
-        ;; (c/exec :wget (str url "-O" dest)))
+        (let [url (str "https://www.dropbox.com/s/51894h03ayt6xtq/xenon-host-" version
+                  "-jar-with-dependencies.jar")
+             dest (str dir "/xenon-host-" version "-jar-with-dependencies.jar")]
+        (c/exec :wget (str url "-O" dest)))
         (cu/start-daemon!
           {:logfile logfile
            :pidfile pidfile
-           :chdir   dir}        
+           :chdir   dir}
                 binary
                 :-cp (str "./xenon-host-" version "-jar-with-dependencies.jar")
                 :com.vmware.xenon.host.DecentralizedControlPlaneHost
@@ -115,19 +115,21 @@
                 (str "--publicUri=http://" (name node) ":8000")
                 (str "--sandbox=" (str dir "/sandbox/xenon"))
                 (str "--peerNodes=" (initial-cluster test)))
-          
+
           (jepsen/synchronize test)
           ;;(post-node-group-join node test)
-          (when (= (str (:name node)) "n1") 
+          (info node "initilizing db" node)
+          (when (= (str node) ":n1" )
              (client-write-post node test "k" "0"))
 
           (Thread/sleep 10000))))
 
     (teardown! [_ test node]
-      (info node "tearing down xenon"))
-      ;;(cu/stop-daemon! binary pidfile)
-      ;;(c/su
-      ;;  (c/exec :rm :-rf (str dir "/sandbox/xenon" ))))
+      (info node "tearing down xenon")
+      (cu/stop-daemon! binary pidfile)
+      (c/su
+        (c/exec :rm :-rf (str dir "/sandbox/xenon" )))
+    )
 
     db/LogFiles
     (log-files [_ test node]
