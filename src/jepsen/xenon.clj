@@ -14,7 +14,9 @@
                     [db :as db]
                     [generator :as gen]
                     [core :as jepsen]
-                    [tests :as tests]]
+                    [tests :as tests]
+                    [independent :as independent]]
+            [jepsen.checker.timeline :as timeline]
             [jepsen.control.net  :as net]
             [jepsen.control.util :as cu]
             [jepsen.os.debian :as debian]))
@@ -162,12 +164,16 @@
           :os debian/os
           :db (db "1.4.2-SNAPSHOT")
           :client (client nil nil)
-          :model  (model/cas-register)
-          :checker checker/linearizable
+          :model (model/cas-register)
           :generator (->> (gen/mix [r w])
-                          (gen/stagger 1)
+                          (gen/stagger 1/10)
                           (gen/clients)
-                          (gen/time-limit 15))}
+                          (gen/time-limit 15))
+          :checker (checker/compose
+                     {:perf   (checker/perf)
+                      :timeline (timeline/html)
+                      :linear (independent/checker checker/linearizable)
+                      })}
          opts))
 
 (defn -main
