@@ -6,7 +6,9 @@
             [clj-http.client :as httpclient]
             [verschlimmbesserung.core :as v]
             [slingshot.slingshot :refer [try+]]
-            [jepsen [cli :as cli]
+            [knossos.model :as model]
+            [jepsen [checker :as checker] 
+                    [cli :as cli]
                     [client :as client]
                     [control :as c]
                     [db :as db]
@@ -23,7 +25,7 @@
 (def pidfile (str dir "/xenon.pid"))
 
 (defn r   [_ _] {:type :invoke, :f :read, :value nil})
-(defn w   [_ _] {:type :invoke, :f :write, :value (str "" (rand-int 5))})
+(defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
 (defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
 (defn post-node-group-join
@@ -72,17 +74,15 @@
 
 (defn client-write-put
   [node test key value]
-  (httpclient/put (examples node) {:body {:name value} :content-type :json})
-  "")
+  (httpclient/put (str (examples node) "/" key ) {:form-params {:name (str value)} :content-type :json}))
 
 (defn client-write-post
   [node test key value]
-  (httpclient/post (examples node) {:body {:name value :documentSelfLink key} :content-type :json})
-  "")
+  (httpclient/post (str (examples node)) {:form-params {:name (str value) :documentSelfLink (str key )} :debug true :content-type :json}))
 
 (defn client-read
   [node key]
-  (:name (json/read-str (:body (httpclient/get (str (examples node) "/" key) {:content-type :json})))))
+  (:name (json/read-str (:body (httpclient/get (str (examples node) "/" key) {:accept :json})) :key-fn keyword )))
 
 
 (defn db
@@ -114,22 +114,27 @@
           
           (jepsen/synchronize test)
           ;;(post-node-group-join node test)
-          (when (= (:name node) "n1") 
+          (when (= (str (:name node)) "n1") 
              (client-write-post node test "k" "0"))
 
           (Thread/sleep 10000))))
 
     (teardown! [_ test node]
-      (info node "tearing down xenon")
-      (cu/stop-daemon! binary pidfile)
-      (c/su
-        (c/exec :rm :-rf (str dir "/sandbox/xenon" ))))
+      (info node "tearing down xenon"))
+      ;;(cu/stop-daemon! binary pidfile)
+      ;;(c/su
+      ;;  (c/exec :rm :-rf (str dir "/sandbox/xenon" ))))
 
     db/LogFiles
     (log-files [_ test node]
       [logfile])))
 
 (def mynode nil)
+
+(defn parse-long
+  "Parses a string to a Long. Passes through `nil`."
+  [s]
+  (when s (Long/parseLong s)))
 
 (defn client
   "A client for a single compare-and-set register"
@@ -141,7 +146,7 @@
 
     (invoke! [this test op]
          (case (:f op)
-         :read (assoc op :type :ok, :value (client-read node "k"))
+         :read (assoc op :type :ok, :value (parse-long (client-read node "k")))
          :write (do (client-write-put node test "k" (:value op))
                    (assoc op :type, :ok))))
 
@@ -157,6 +162,8 @@
           :os debian/os
           :db (db "1.4.2-SNAPSHOT")
           :client (client nil nil)
+          :model  (model/cas-register)
+          :checker checker/linearizable
           :generator (->> (gen/mix [r w])
                           (gen/stagger 1)
                           (gen/clients)
