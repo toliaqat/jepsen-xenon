@@ -13,8 +13,10 @@
                     [control :as c]
                     [db :as db]
                     [generator :as gen]
+                    [nemesis :as nemesis]
                     [core :as jepsen]
                     [tests :as tests]
+                    [util :as util :refer [timeout]]
                     [independent :as independent]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.control.net  :as net]
@@ -164,11 +166,16 @@
           :os debian/os
           :db (db "1.4.2-SNAPSHOT")
           :client (client nil nil)
+          :nemesis (nemesis/partition-random-halves)
           :model (model/cas-register)
           :generator (->> (gen/mix [r w])
-                          (gen/stagger 1/10)
-                          (gen/clients)
-                          (gen/time-limit 15))
+                          (gen/stagger 1/100)
+                          (gen/nemesis
+                            (gen/seq (cycle [(gen/sleep 5)
+                                             {:type :info, :f :start}
+                                             (gen/sleep 5)
+                                             {:type :info, :f :stop}])))
+                          (gen/time-limit (:time-limit opts)))
           :checker (checker/compose
                      {:perf   (checker/perf)
                       :timeline (timeline/html)
