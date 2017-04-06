@@ -6,6 +6,7 @@
             [clj-http.client :as httpclient]
             [verschlimmbesserung.core :as v]
             [slingshot.slingshot :refer [try+]]
+            [potemkin :refer [definterface+]]
             [knossos.model :as model]
             [jepsen [checker :as checker]
                     [cli :as cli]
@@ -57,13 +58,19 @@
   [node]
   (str (node-url node 8000) "/core/examples"))
 
-(defn x-put
-  [node test key value]
-  (httpclient/put (str (examples-url node) "/" key ) {:form-params {:name (str value)} :content-type :json}))
-
 (defn x-post
   [node test key value]
-  (httpclient/post (str (examples-url node)) {:form-params {:name (str value) :documentSelfLink (str key )} :debug true :content-type :json}))
+  (try
+  (httpclient/post (str (examples-url node)) {:form-params {:name (str value) :documentSelfLink (str key )} :content-type :json})
+  (catch Exception e
+     ())))
+
+(defn x-put
+  [node test key value]
+  (try
+  (httpclient/put (str (examples-url node) "/" key ) {:form-params {:name (str value)} :content-type :json})
+  (catch Exception e
+     (x-post node test key value))))
 
 (defn x-get
   [node key]
@@ -93,6 +100,93 @@
   [s]
   (when s (Long/parseLong s)))
 
+
+(definterface+ Model
+  (step [model op]
+        "The job of a model is to *validate* that a sequence of operations
+        applied to it is consistent. Each invocation of (step model op)
+        returns a new state of the model, or, if the operation was
+        inconsistent with the model's state, returns a (knossos/inconsistent
+        msg). (reduce step model history) then validates that a particular
+        history is valid, and returns the final state of the model.
+        Models should be a pure, deterministic function of their state and an
+        operation's :f and :value."))
+
+(defrecord Inconsistent [msg]
+  Model
+  (step [this op] this)
+
+  Object
+  (toString [this] msg))
+
+(defn inconsistent
+  "Represents an invalid termination of a model; e.g. that an operation could
+  not have taken place."
+  [msg]
+  (Inconsistent. msg))
+
+(defn inconsistent?
+  "Is a model inconsistent?"
+  [model]
+  (instance? Inconsistent model))
+
+(defrecord NoOp []
+  Model
+  (step [m op] m))
+
+(def noop
+  "A model which always returns itself, unchanged."
+  (NoOp.))
+
+(defrecord Register [value]
+  Model
+  (step [r op]
+    (condp = (:f op)
+      :write (Register. (:value op))
+      :read  (if (or (nil? (:value op))     ; We don't know what the read was
+                     (= value (:value op))) ; Read was a specific value
+               r
+               (inconsistent
+                 (str (pr-str value) "~" (pr-str (:value op)))))
+      :query  (if (or (nil? (:value op))     ; We don't know what the read was
+                     (= value (:value op))) ; Read was a specific value
+               r
+               (inconsistent
+                 (str (pr-str value) "~" (pr-str (:value op)))))))
+
+
+  Object
+  (toString [r] (pr-str value)))
+
+(defn register
+  "A read-write register."
+  ([] (Register. nil))
+  ([x] (Register. x)))
+
+(defrecord Register [value]
+  Model
+  (step [r op]
+    (condp = (:f op)
+      :write (Register. (:value op))
+      :query  (if (or (nil? (:value op))
+                     (= value (:value op)))
+               r
+               (inconsistent (str "can't query " (:value op)
+                                  " from register " value)))
+      :read  (if (or (nil? (:value op))
+                     (= value (:value op)))
+               r
+               (inconsistent (str "can't read " (:value op)
+                                  " from register " value)))))
+  Object
+  (toString [this] (pr-str value)))
+
+(defn a-register
+  "A register"
+  ([]      (Register. nil))
+  ([value] (Register. value)))
+
+
 (defn db
   "Xenon host for a particular version."
   [version]
@@ -121,11 +215,6 @@
                 (str "--peerNodes=" (initial-cluster test)))
 
           (jepsen/synchronize test)
-          ;;(post-node-group-join node test)
-          (info node "initilizing db" node)
-          (when (= (str node) ":n1" )
-             (x-post node test "k" "0"))
-
           (Thread/sleep 10000))))
 
     (teardown! [_ test node]
@@ -142,6 +231,7 @@
 (defn r   [_ _] {:type :invoke, :f :read, :value nil})
 (defn q   [_ _] {:type :invoke, :f :query, :value nil})
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
+(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
 (defn client
   "A client for a single compare-and-set register"
@@ -152,11 +242,25 @@
                          {:timeout 5000}) node))
 
     (invoke! [this test op]
+      (let [[k v] (:value op)]
+       (try+
          (case (:f op)
-         :read (assoc op :type :ok, :value (parse-long (x-get node "k")))
-         :query (assoc op :type :ok, :value (parse-long (x-query node "k")))
-         :write (do (x-put node test "k" (:value op))
-                   (assoc op :type, :ok))))
+         :read  (let [value (parse-long (x-get node k))]
+                     (assoc op :type :ok, :value value))
+         :query (let [value (parse-long (x-query node k))]
+                     (assoc op :type :ok, :value value))
+         :write (do (x-put node test k v)
+                   (assoc op :type, :ok)))
+         (catch java.net.SocketTimeoutException e
+            (assoc op
+                   :type (if (= :read (:f op)) :fail :info)
+                   :error :timeout))
+         (catch [:status 408] e
+            (assoc op :type :fail, :error :not-found))
+         (catch [:status 409] e
+            (assoc op :type :fail, :error :not-found))
+         (catch [:status 404] e
+            (assoc op :type :fail, :error :not-found)))))
 
     (teardown! [_ test])))
 
@@ -171,9 +275,14 @@
           :db (db "1.4.2-SNAPSHOT")
           :client (client nil nil)
           :nemesis (nemesis/partition-random-halves)
-          :model (model/cas-register)
-          :generator (->> (gen/mix [q w])
-                          (gen/stagger 1/100)
+          :model (a-register)
+          :generator (->> (independent/concurrent-generator
+                            10
+                            (range)
+                            (fn [k]
+                              (->> (gen/mix [r w])
+                                   (gen/stagger 1/100)
+                                   (gen/limit 100))))
                           (gen/nemesis
                             (gen/seq (cycle [(gen/sleep 5)
                                              {:type :info, :f :start}
