@@ -1,3 +1,4 @@
+
 (ns jepsen.xenon
   (:gen-class)
   (:require [clojure.tools.logging :refer :all]
@@ -60,10 +61,8 @@
 
 (defn x-post
   [node test key value]
-  (try
   (httpclient/post (str (examples-url node)) {:form-params {:name (str value) :documentSelfLink (str key )} :content-type :json})
-  (catch Exception e
-     ())))
+     )
 
 (defn x-put
   [node test key value]
@@ -231,7 +230,6 @@
 (defn r   [_ _] {:type :invoke, :f :read, :value nil})
 (defn q   [_ _] {:type :invoke, :f :query, :value nil})
 (defn w   [_ _] {:type :invoke, :f :write, :value (rand-int 5)})
-(defn cas [_ _] {:type :invoke, :f :cas, :value [(rand-int 5) (rand-int 5)]})
 
 (defn client
   "A client for a single compare-and-set register"
@@ -242,13 +240,14 @@
                          {:timeout 5000}) node))
 
     (invoke! [this test op]
-      (let [[k v] (:value op)]
+      (let [ [k v] (:value op)]
        (try+
          (case (:f op)
-         :read  (let [value (parse-long (x-get node k))]
-                     (assoc op :type :ok, :value value))
+         ;; TODO: Move read to use x-get after custom register can validate query
+         :read  (let [value (parse-long (x-query node k))]
+                     (assoc op :type :ok, :value (independent/tuple k value)))
          :query (let [value (parse-long (x-query node k))]
-                     (assoc op :type :ok, :value value))
+                     (assoc op :type :ok, :value (independent/tuple k value)))
          :write (do (x-put node test k v)
                    (assoc op :type, :ok)))
          (catch java.net.SocketTimeoutException e
@@ -256,9 +255,17 @@
                    :type (if (= :read (:f op)) :fail :info)
                    :error :timeout))
          (catch [:status 408] e
-            (assoc op :type :fail, :error :not-found))
-         (catch [:status 409] e
-            (assoc op :type :fail, :error :not-found))
+            (assoc op
+                   :type (if (= :read (:f op)) :fail :info)
+                   :error :timeout))
+          (catch [:status 409] e
+            (assoc op
+                   :type (if (= :read (:f op)) :fail :info)
+                   :error :conflict))
+         (catch [:status 500] e
+            (assoc op
+                   :type :fail
+                   :error :conflict))
          (catch [:status 404] e
             (assoc op :type :fail, :error :not-found)))))
 
@@ -275,25 +282,26 @@
           :db (db "1.4.2-SNAPSHOT")
           :client (client nil nil)
           :nemesis (nemesis/partition-random-halves)
-          :model (a-register)
+          :model (model/cas-register)
           :generator (->> (independent/concurrent-generator
                             10
                             (range)
                             (fn [k]
                               (->> (gen/mix [r w])
-                                   (gen/stagger 1/100)
+                                   (gen/stagger 1/10)
                                    (gen/limit 100))))
-                          (gen/nemesis
+                           (gen/nemesis
                             (gen/seq (cycle [(gen/sleep 5)
                                              {:type :info, :f :start}
                                              (gen/sleep 5)
                                              {:type :info, :f :stop}])))
                           (gen/time-limit (:time-limit opts)))
           :checker (checker/compose
-                     {:perf   (checker/perf)
-                      :timeline (timeline/html)
-                      :linear (independent/checker checker/linearizable)
-                      })}
+                   {:perf     (checker/perf)
+                      :indep (independent/checker
+                               (checker/compose
+                                 {:timeline (timeline/html)
+                                  :linear   checker/linearizable}))})}
          opts))
 
 (defn -main
