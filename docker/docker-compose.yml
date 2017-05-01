@@ -4,6 +4,10 @@ services:
     container_name: jepsen-control
     hostname: control
     build: ./control
+    volumes:
+     - /Users/tliaqat/jepsen-xenon:/jepsen-xenon
+    ports:
+     - "8080:8080"
     env_file: ./secret/control.env
     privileged: true
     links:

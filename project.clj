@@ -7,4 +7,9 @@
   :dependencies [[org.clojure/clojure "1.8.0"]
                  [jepsen "0.1.4"]
                  [org.clojure/data.json "0.2.6"]
-                 [verschlimmbesserung "0.1.3"]])
+                 [org.clojure/tools.logging "0.2.6"]
+                 [org.clojure/clojure "1.8.0"]
+                 [org.clojure/data.json "0.2.6"]
+                 [cheshire "5.6.3"]
+                 [clj-http "2.2.0"]
+                 ])
